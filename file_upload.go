@@ -12,6 +12,7 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
@@ -74,10 +75,10 @@ func (protonDrive *ProtonDrive) handleRevisionConflict(ctx context.Context, link
 	}
 }
 
-func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, parentLink *proton.Link, filename string, modTime time.Time, mimeType string) (string, string, *crypto.SessionKey, *crypto.KeyRing, error) {
+func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, parentLink *proton.Link, filename string, modTime time.Time, mimeType string) (string, string, *crypto.SessionKey, *crypto.KeyRing, []byte, error) {
 	parentNodeKR, err := protonDrive.getLinkKR(ctx, parentLink)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 
 	/*
@@ -86,7 +87,7 @@ func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, paren
 	*/
 	newNodeKey, newNodePassphraseEnc, newNodePassphraseSignature, err := generateNodeKeys(parentNodeKR, protonDrive.DefaultAddrKR)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 
 	createFileReq := proton.CreateFileReq{
@@ -112,7 +113,7 @@ func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, paren
 	*/
 	err = createFileReq.SetName(filename, protonDrive.DefaultAddrKR, parentNodeKR)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 
 	/*
@@ -121,17 +122,17 @@ func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, paren
 	*/
 	signatureVerificationKR, err := protonDrive.getSignatureVerificationKeyring([]string{parentLink.SignatureEmail}, parentNodeKR)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 	parentHashKey, err := parentLink.GetHashKey(parentNodeKR, signatureVerificationKR)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 
 	/* Use parent's hash key */
 	err = createFileReq.SetHash(filename, parentHashKey)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 
 	/*
@@ -140,7 +141,7 @@ func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, paren
 	*/
 	newNodeKR, err := getKeyRing(parentNodeKR, protonDrive.DefaultAddrKR, newNodeKey, newNodePassphraseEnc, newNodePassphraseSignature)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 
 	/*
@@ -149,7 +150,7 @@ func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, paren
 	*/
 	newSessionKey, err := createFileReq.SetContentKeyPacketAndSignature(newNodeKR)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 
 	createFileAction := func() (*proton.CreateFileRes, *proton.Link, error) {
@@ -190,12 +191,12 @@ func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, paren
 
 	createFileResp, link, err := createFileAction()
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 
 	revisionID, shouldSubmitCreateFileRequestAgain, err := protonDrive.handleRevisionConflict(ctx, link, createFileResp)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
 
 	if shouldSubmitCreateFileRequestAgain {
@@ -203,12 +204,12 @@ func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, paren
 		// we need to delete the link and recreate one
 		createFileResp, link, err = createFileAction()
 		if err != nil {
-			return "", "", nil, nil, err
+			return "", "", nil, nil, nil, err
 		}
 
 		revisionID, _, err = protonDrive.handleRevisionConflict(ctx, link, createFileResp)
 		if err != nil {
-			return "", "", nil, nil, err
+			return "", "", nil, nil, nil, err
 		}
 	}
 
@@ -219,28 +220,81 @@ func (protonDrive *ProtonDrive) createFileUploadDraft(ctx context.Context, paren
 		// get original sessionKey and nodeKR for the current link
 		parentNodeKR, err = protonDrive.getLinkKRByID(ctx, link.ParentLinkID)
 		if err != nil {
-			return "", "", nil, nil, err
+			return "", "", nil, nil, nil, err
 		}
 		signatureVerificationKR, err := protonDrive.getSignatureVerificationKeyring([]string{link.SignatureEmail})
 		if err != nil {
-			return "", "", nil, nil, err
+			return "", "", nil, nil, nil, err
 		}
 		newNodeKR, err = link.GetKeyRing(parentNodeKR, signatureVerificationKR)
 		if err != nil {
-			return "", "", nil, nil, err
+			return "", "", nil, nil, nil, err
 		}
 		newSessionKey, err = link.GetSessionKey(newNodeKR)
 		if err != nil {
-			return "", "", nil, nil, err
+			return "", "", nil, nil, nil, err
 		}
 	} else {
 		linkID = createFileResp.ID
 	}
 
-	return linkID, revisionID, newSessionKey, newNodeKR, nil
+	verificationData, err := protonDrive.c.GetRevisionVerificationData(ctx, protonDrive.MainShare.VolumeID, linkID, revisionID)
+	if err != nil {
+		return "", "", nil, nil, nil, err
+	}
+	verificationCode, err := base64.StdEncoding.DecodeString(verificationData.VerificationCode)
+	if err != nil {
+		return "", "", nil, nil, nil, err
+	}
+
+	return linkID, revisionID, newSessionKey, newNodeKR, verificationCode, nil
 }
 
-func (protonDrive *ProtonDrive) uploadAndCollectBlockData(ctx context.Context, newSessionKey *crypto.SessionKey, newNodeKR *crypto.KeyRing, file io.Reader, linkID, revisionID string) ([]byte, int64, []int64, string, error) {
+// Thumbnail is a rendered preview to attach to the revision. Photos
+// uploaded without one show up in the Proton Photos timeline with no
+// preview image, and there is no API to add one after the commit.
+type Thumbnail struct {
+	Type int // proton.ThumbnailTypeDefault / ThumbnailTypePhoto
+	Data []byte
+}
+
+type encryptedThumbnail struct {
+	thumbType int
+	encData   []byte
+	hash      []byte // raw sha256, for the manifest
+	base64   string  // base64 sha256, for the request
+}
+
+// encryptThumbnails encrypts each thumbnail with the revision's content
+// session key. Unlike content blocks (which carry a separate detached
+// EncSignature field), the thumbnail request has no signature field, so the
+// signature is embedded via EncryptAndSign -- matching Proton's own SDK
+// (encryptThumbnailBlock takes the signing key and returns only encrypted
+// data).
+func (protonDrive *ProtonDrive) encryptThumbnails(sessionKey *crypto.SessionKey, thumbnails []Thumbnail) ([]encryptedThumbnail, error) {
+	result := make([]encryptedThumbnail, 0, len(thumbnails))
+	for _, thumbnail := range thumbnails {
+		if len(thumbnail.Data) == 0 {
+			continue
+		}
+		encData, err := sessionKey.EncryptAndSign(crypto.NewPlainMessage(thumbnail.Data), protonDrive.DefaultAddrKR)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(encData)
+		result = append(result, encryptedThumbnail{
+			thumbType: thumbnail.Type,
+			encData:   encData,
+			hash:      sum[:],
+			base64:    base64.StdEncoding.EncodeToString(sum[:]),
+		})
+	}
+	// The manifest expects thumbnail hashes ordered by type.
+	sort.Slice(result, func(i, j int) bool { return result[i].thumbType < result[j].thumbType })
+	return result, nil
+}
+
+func (protonDrive *ProtonDrive) uploadAndCollectBlockData(ctx context.Context, newSessionKey *crypto.SessionKey, newNodeKR *crypto.KeyRing, verificationCode []byte, thumbnails []Thumbnail, file io.Reader, linkID, revisionID string) ([]byte, int64, []int64, string, error) {
 	type PendingUploadBlocks struct {
 		blockUploadInfo proton.BlockUploadInfo
 		encData         []byte
@@ -252,10 +306,26 @@ func (protonDrive *ProtonDrive) uploadAndCollectBlockData(ctx context.Context, n
 
 	totalFileSize := int64(0)
 
-	pendingUploadBlocks := make([]PendingUploadBlocks, 0)
+	encThumbnails, err := protonDrive.encryptThumbnails(newSessionKey, thumbnails)
+	if err != nil {
+		return nil, 0, nil, "", err
+	}
+
+	// Proton's SDK builds the manifest as thumbnail hashes (ordered by
+	// type) followed by the content block hashes -- get this order wrong
+	// and the commit's manifest signature fails to verify.
 	manifestSignatureData := make([]byte, 0)
+	for _, t := range encThumbnails {
+		manifestSignatureData = append(manifestSignatureData, t.hash...)
+	}
+
+	// Thumbnails belong to the revision, not to any one page of blocks, so
+	// they're requested and uploaded alongside the first batch only.
+	thumbnailsPending := len(encThumbnails) > 0
+
+	pendingUploadBlocks := make([]PendingUploadBlocks, 0)
 	uploadPendingBlocks := func() error {
-		if len(pendingUploadBlocks) == 0 {
+		if len(pendingUploadBlocks) == 0 && !thumbnailsPending {
 			return nil
 		}
 
@@ -271,32 +341,65 @@ func (protonDrive *ProtonDrive) uploadAndCollectBlockData(ctx context.Context, n
 
 			BlockList: blockList,
 		}
-		blockUploadResp, err := protonDrive.c.RequestBlockUpload(ctx, blockUploadReq)
+		if thumbnailsPending {
+			for _, t := range encThumbnails {
+				blockUploadReq.ThumbnailList = append(blockUploadReq.ThumbnailList, proton.ThumbnailUploadInfo{
+					Type: t.thumbType,
+					Size: int64(len(t.encData)),
+					Hash: t.base64,
+				})
+			}
+		}
+
+		blockUploadResp, thumbnailResp, err := protonDrive.c.RequestBlockAndThumbnailUpload(ctx, blockUploadReq)
 		if err != nil {
 			return err
 		}
 
 		errChan := make(chan error)
+		pendingUploads := 0
+
 		uploadBlockWrapper := func(ctx context.Context, errChan chan error, bareURL, token string, block io.Reader) {
-			// log.Println("Before semaphore")
 			if err := protonDrive.blockUploadSemaphore.Acquire(ctx, 1); err != nil {
 				errChan <- err
+				return
 			}
 			defer protonDrive.blockUploadSemaphore.Release(1)
-			// log.Println("After semaphore")
-			// defer log.Println("Release semaphore")
 
 			errChan <- protonDrive.c.UploadBlock(ctx, bareURL, token, block)
 		}
+
 		for i := range blockUploadResp {
 			go uploadBlockWrapper(ctx, errChan, blockUploadResp[i].BareURL, blockUploadResp[i].Token, bytes.NewReader(pendingUploadBlocks[i].encData))
+			pendingUploads++
 		}
 
-		for i := 0; i < len(blockUploadResp); i++ {
-			err := <-errChan
-			if err != nil {
-				return err
+		if thumbnailsPending {
+			for _, link := range thumbnailResp {
+				var data []byte
+				for _, t := range encThumbnails {
+					if t.thumbType == link.ThumbnailType {
+						data = t.encData
+						break
+					}
+				}
+				if data == nil {
+					continue
+				}
+				go uploadBlockWrapper(ctx, errChan, link.BareURL, link.Token, bytes.NewReader(data))
+				pendingUploads++
 			}
+			thumbnailsPending = false
+		}
+
+		var firstErr error
+		for i := 0; i < pendingUploads; i++ {
+			if err := <-errChan; err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if firstErr != nil {
+			return firstErr
 		}
 
 		pendingUploadBlocks = pendingUploadBlocks[:0]
@@ -371,12 +474,14 @@ func (protonDrive *ProtonDrive) uploadAndCollectBlockData(ctx context.Context, n
 				Size:         int64(len(encData)),
 				EncSignature: encSignatureStr,
 				Hash:         base64Hash,
+				Verifier: proton.BlockVerifier{
+					Token: proton.BuildVerificationToken(verificationCode, encData),
+				},
 			},
 			encData: encData,
 		})
 	}
-	err := uploadPendingBlocks()
-	if err != nil {
+	if err := uploadPendingBlocks(); err != nil {
 		return nil, 0, nil, "", err
 	}
 
@@ -385,7 +490,7 @@ func (protonDrive *ProtonDrive) uploadAndCollectBlockData(ctx context.Context, n
 	return manifestSignatureData, totalFileSize, blockSizes, sha1String, nil
 }
 
-func (protonDrive *ProtonDrive) commitNewRevision(ctx context.Context, nodeKR *crypto.KeyRing, xAttrCommon *proton.RevisionXAttrCommon, manifestSignatureData []byte, linkID, revisionID string) error {
+func (protonDrive *ProtonDrive) commitNewRevision(ctx context.Context, nodeKR *crypto.KeyRing, xAttrCommon *proton.RevisionXAttrCommon, camera *proton.RevisionXAttrCamera, photo *proton.CommitRevisionPhoto, manifestSignatureData []byte, linkID, revisionID string) error {
 	manifestSignature, err := protonDrive.DefaultAddrKR.SignDetached(crypto.NewPlainMessage(manifestSignatureData))
 	if err != nil {
 		return err
@@ -398,9 +503,10 @@ func (protonDrive *ProtonDrive) commitNewRevision(ctx context.Context, nodeKR *c
 	commitRevisionReq := proton.CommitRevisionReq{
 		ManifestSignature: manifestSignatureString,
 		SignatureAddress:  protonDrive.signatureAddress,
+		Photo:             photo,
 	}
 
-	err = commitRevisionReq.SetEncXAttrString(protonDrive.DefaultAddrKR, nodeKR, xAttrCommon)
+	err = commitRevisionReq.SetEncXAttrString(protonDrive.DefaultAddrKR, nodeKR, xAttrCommon, camera)
 	if err != nil {
 		return err
 	}
@@ -417,7 +523,7 @@ func (protonDrive *ProtonDrive) commitNewRevision(ctx context.Context, nodeKR *c
 // 0 = normal mode
 // 1 = up to create revision
 // 2 = up to block upload
-func (protonDrive *ProtonDrive) uploadFile(ctx context.Context, parentLink *proton.Link, filename string, modTime time.Time, file io.Reader, testParam int) (string, *proton.RevisionXAttrCommon, error) {
+func (protonDrive *ProtonDrive) uploadFile(ctx context.Context, parentLink *proton.Link, filename string, modTime time.Time, file io.Reader, thumbnails []Thumbnail, testParam int) (string, *proton.RevisionXAttrCommon, error) {
 	// TODO: if we should use github.com/gabriel-vasile/mimetype to detect the MIME type from the file content itself
 	// Note: this approach might cause the upload progress to display the "fake" progress, since we read in all the content all-at-once
 	// mimetype.SetLimit(0)
@@ -432,7 +538,7 @@ func (protonDrive *ProtonDrive) uploadFile(ctx context.Context, parentLink *prot
 	}
 
 	/* step 1: create a draft */
-	linkID, revisionID, newSessionKey, newNodeKR, err := protonDrive.createFileUploadDraft(ctx, parentLink, filename, modTime, mimeType)
+	linkID, revisionID, newSessionKey, newNodeKR, verificationCode, err := protonDrive.createFileUploadDraft(ctx, parentLink, filename, modTime, mimeType)
 	if err != nil {
 		return "", nil, err
 	}
@@ -442,7 +548,7 @@ func (protonDrive *ProtonDrive) uploadFile(ctx context.Context, parentLink *prot
 	}
 
 	/* step 2: upload blocks and collect block data */
-	manifestSignature, fileSize, blockSizes, digests, err := protonDrive.uploadAndCollectBlockData(ctx, newSessionKey, newNodeKR, file, linkID, revisionID)
+	manifestSignature, fileSize, blockSizes, digests, err := protonDrive.uploadAndCollectBlockData(ctx, newSessionKey, newNodeKR, verificationCode, thumbnails, file, linkID, revisionID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -462,7 +568,37 @@ func (protonDrive *ProtonDrive) uploadFile(ctx context.Context, parentLink *prot
 			"SHA1": digests,
 		},
 	}
-	err = protonDrive.commitNewRevision(ctx, newNodeKR, xAttrCommon, manifestSignature, linkID, revisionID)
+	// Photos-share revisions are rejected (Code=2511) without at least
+	// Camera.CaptureTime set. We don't do EXIF parsing here, so fall back
+	// to the file's modification time -- the same fallback Proton's own
+	// SDK uses when a photo has no EXIF capture time.
+	camera := &proton.RevisionXAttrCamera{
+		CaptureTime: modTime.UTC().Format("2006-01-02T15:04:05.000Z"),
+	}
+
+	// The commit itself additionally requires a PLAINTEXT top-level Photo
+	// field (separate from the encrypted XAttr/Camera above -- the server
+	// can't decrypt XAttr, so it needs an unencrypted CaptureTime +
+	// ContentHash to validate/index the photo). Confirmed from Proton's
+	// own official Drive SDK (CommitRevisionPhotoDto).
+	parentNodeKRForHash, err := protonDrive.getLinkKR(ctx, parentLink)
+	if err != nil {
+		return "", nil, err
+	}
+	sigVerifyKRForHash, err := protonDrive.getSignatureVerificationKeyring([]string{parentLink.SignatureEmail}, parentNodeKRForHash)
+	if err != nil {
+		return "", nil, err
+	}
+	parentHashKey, err := parentLink.GetHashKey(parentNodeKRForHash, sigVerifyKRForHash)
+	if err != nil {
+		return "", nil, err
+	}
+	photo := &proton.CommitRevisionPhoto{
+		CaptureTime: modTime.UTC().Unix(),
+		ContentHash: proton.ComputePhotoContentHash(parentHashKey, digests),
+	}
+
+	err = protonDrive.commitNewRevision(ctx, newNodeKR, xAttrCommon, camera, photo, manifestSignature, linkID, revisionID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -476,7 +612,19 @@ func (protonDrive *ProtonDrive) UploadFileByReader(ctx context.Context, parentLi
 		return "", nil, err
 	}
 
-	return protonDrive.uploadFile(ctx, parentLink, filename, modTime, file, testParam)
+	return protonDrive.uploadFile(ctx, parentLink, filename, modTime, file, nil, testParam)
+}
+
+// UploadFileByReaderWithThumbnails is UploadFileByReader plus rendered
+// previews. Added locally: photos need thumbnails attached during the
+// block-upload phase, and there is no API to add them after the commit.
+func (protonDrive *ProtonDrive) UploadFileByReaderWithThumbnails(ctx context.Context, parentLinkID string, filename string, modTime time.Time, file io.Reader, thumbnails []Thumbnail) (string, *proton.RevisionXAttrCommon, error) {
+	parentLink, err := protonDrive.getLink(ctx, parentLinkID)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return protonDrive.uploadFile(ctx, parentLink, filename, modTime, file, thumbnails, 0)
 }
 
 func (protonDrive *ProtonDrive) UploadFileByPath(ctx context.Context, parentLink *proton.Link, filename string, filePath string, testParam int) (string, *proton.RevisionXAttrCommon, error) {
@@ -493,7 +641,7 @@ func (protonDrive *ProtonDrive) UploadFileByPath(ctx context.Context, parentLink
 
 	in := bufio.NewReader(f)
 
-	return protonDrive.uploadFile(ctx, parentLink, filename, info.ModTime(), in, testParam)
+	return protonDrive.uploadFile(ctx, parentLink, filename, info.ModTime(), in, nil, testParam)
 }
 
 /*

@@ -33,6 +33,13 @@ type FirstLoginCredentialData struct {
 	Password        string
 	MailboxPassword string
 	TwoFA           string
+
+	// HVToken/HVMethod carry a solved human-verification proof (from a
+	// previous attempt that returned ErrHumanVerificationRequired) to
+	// attach to this login attempt, exactly as Proton's own apps retry
+	// their auth request after the user solves the challenge.
+	HVToken  string
+	HVMethod string
 }
 
 type ReusableCredentialData struct {

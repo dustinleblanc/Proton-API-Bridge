@@ -4,12 +4,53 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"os"
 
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 	"github.com/ProtonMail/go-proton-api"
+	"github.com/go-resty/resty/v2"
 )
+
+// HVChallenge mirrors what Proton's API returns (Code=9001) in APIError's
+// Details field when it wants human verification before allowing a login.
+// This fork of go-proton-api doesn't have the official upstream's
+// APIHVDetails/GetHVDetails convenience helpers, so we extract it manually
+// the same way internal/proton (this project's other login path) does.
+type HVChallenge struct {
+	Token   string   `json:"HumanVerificationToken"`
+	Methods []string `json:"HumanVerificationMethods"`
+}
+
+// HVRequiredError signals that a fresh login needs human verification
+// before it can proceed. Callers should present Challenge to the user (via
+// Proton's hosted verify.proton.me page) and retry Login with
+// config.FirstLoginCredential.HVToken/HVMethod set to the solved proof.
+type HVRequiredError struct {
+	Challenge HVChallenge
+}
+
+func (e *HVRequiredError) Error() string {
+	return fmt.Sprintf("human verification required (methods: %v)", e.Challenge.Methods)
+}
+
+func extractHVChallenge(err error) (*HVChallenge, bool) {
+	var apiErr *proton.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != proton.HumanVerificationRequired {
+		return nil, false
+	}
+	data, marshalErr := json.Marshal(apiErr.Details)
+	if marshalErr != nil {
+		return nil, false
+	}
+	var challenge HVChallenge
+	if err := json.Unmarshal(data, &challenge); err != nil || challenge.Token == "" {
+		return nil, false
+	}
+	return &challenge, true
+}
 
 type ProtonDriveCredential struct {
 	UID           string
@@ -86,8 +127,24 @@ func Login(ctx context.Context, config *Config, authHandler proton.AuthHandler, 
 
 		// perform login
 		var err error
+		if config.FirstLoginCredential.HVToken != "" && config.FirstLoginCredential.HVMethod != "" {
+			// Matches Proton's own TestApiClient.Router.humanverify header
+			// construction (protoncore_ios APIClient/TestAPI.swift) -- these
+			// two headers are what the real apps attach to the retried auth
+			// request after a human verification challenge is solved.
+			hvToken := config.FirstLoginCredential.HVToken
+			hvMethod := config.FirstLoginCredential.HVMethod
+			m.AddPreRequestHook(func(_ *resty.Client, r *resty.Request) error {
+				r.SetHeader("x-pm-human-verification-token-type", hvMethod)
+				r.SetHeader("x-pm-human-verification-token", hvToken)
+				return nil
+			})
+		}
 		c, auth, err = m.NewClientWithLogin(ctx, username, []byte(password))
 		if err != nil {
+			if challenge, ok := extractHVChallenge(err); ok {
+				return nil, nil, nil, nil, nil, nil, &HVRequiredError{Challenge: *challenge}
+			}
 			return nil, nil, nil, nil, nil, nil, err
 		}
 		c.AddAuthHandler(authHandler)
