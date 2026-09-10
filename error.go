@@ -21,4 +21,5 @@ var (
 	ErrWrongUsageOfGetLink                   = errors.New("internal error for getLink - empty linkID passed in")
 	ErrSeekOffsetAfterSkippingBlocks         = errors.New("internal error for download seek - the offset after skipping blocks is wrong")
 	ErrNoKeyringForSignatureVerification     = errors.New(("internal error for signature verification - no keyring is generated"))
+	ErrNoThumbnail                           = errors.New("the revision has no thumbnail of the requested type")
 )
