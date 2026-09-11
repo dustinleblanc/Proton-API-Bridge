@@ -20,6 +20,13 @@ type ProtonDrive struct {
 
 	Config *common.Config
 
+	// isPhotosVolume marks a drive scoped to a Photos share. Revisions
+	// committed there must carry Camera XAttr + a plaintext Photo block
+	// (Code=2511 otherwise); revisions in a regular Drive volume must NOT
+	// carry them (the server rejects photo attributes outside photo shares
+	// with the same Code=2511). Set by the constructors.
+	isPhotosVolume bool
+
 	c                *proton.Client
 	m                *proton.Manager
 	userKR           *crypto.KeyRing
@@ -138,6 +145,8 @@ func NewProtonDrive(ctx context.Context, config *common.Config, authHandler prot
 		DefaultAddrKR: mainShareAddrKR,
 
 		Config: config,
+
+		isPhotosVolume: false,
 
 		c:                c,
 		m:                m,

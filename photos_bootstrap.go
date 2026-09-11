@@ -68,6 +68,8 @@ func NewProtonDriveForPhotos(ctx context.Context, config *common.Config, authHan
 
 		Config: config,
 
+		isPhotosVolume: true,
+
 		c:                c,
 		m:                m,
 		userKR:           userKR,

@@ -568,34 +568,41 @@ func (protonDrive *ProtonDrive) uploadFile(ctx context.Context, parentLink *prot
 			"SHA1": digests,
 		},
 	}
-	// Photos-share revisions are rejected (Code=2511) without at least
-	// Camera.CaptureTime set. We don't do EXIF parsing here, so fall back
-	// to the file's modification time -- the same fallback Proton's own
-	// SDK uses when a photo has no EXIF capture time.
-	camera := &proton.RevisionXAttrCamera{
-		CaptureTime: modTime.UTC().Format("2006-01-02T15:04:05.000Z"),
-	}
 
-	// The commit itself additionally requires a PLAINTEXT top-level Photo
-	// field (separate from the encrypted XAttr/Camera above -- the server
+	// Photo shares reject revisions without Camera.CaptureTime in the
+	// encrypted XAttr plus a plaintext top-level Photo block (the server
 	// can't decrypt XAttr, so it needs an unencrypted CaptureTime +
-	// ContentHash to validate/index the photo). Confirmed from Proton's
-	// own official Drive SDK (CommitRevisionPhotoDto).
-	parentNodeKRForHash, err := protonDrive.getLinkKR(ctx, parentLink)
-	if err != nil {
-		return "", nil, err
-	}
-	sigVerifyKRForHash, err := protonDrive.getSignatureVerificationKeyring([]string{parentLink.SignatureEmail}, parentNodeKRForHash)
-	if err != nil {
-		return "", nil, err
-	}
-	parentHashKey, err := parentLink.GetHashKey(parentNodeKRForHash, sigVerifyKRForHash)
-	if err != nil {
-		return "", nil, err
-	}
-	photo := &proton.CommitRevisionPhoto{
-		CaptureTime: modTime.UTC().Unix(),
-		ContentHash: proton.ComputePhotoContentHash(parentHashKey, digests),
+	// ContentHash to validate/index the photo; confirmed from Proton's own
+	// official Drive SDK, CommitRevisionPhotoDto). Regular Drive volumes
+	// reject exactly those attributes (Code=2511 "Cannot commit Revision
+	// outside Photo Share with Photo attributes"), so only attach them when
+	// this drive is scoped to a Photos share.
+	var camera *proton.RevisionXAttrCamera
+	var photo *proton.CommitRevisionPhoto
+	if protonDrive.isPhotosVolume {
+		// We don't do EXIF parsing here, so fall back to the file's
+		// modification time -- the same fallback Proton's own SDK uses when
+		// a photo has no EXIF capture time.
+		camera = &proton.RevisionXAttrCamera{
+			CaptureTime: modTime.UTC().Format("2006-01-02T15:04:05.000Z"),
+		}
+
+		parentNodeKRForHash, err := protonDrive.getLinkKR(ctx, parentLink)
+		if err != nil {
+			return "", nil, err
+		}
+		sigVerifyKRForHash, err := protonDrive.getSignatureVerificationKeyring([]string{parentLink.SignatureEmail}, parentNodeKRForHash)
+		if err != nil {
+			return "", nil, err
+		}
+		parentHashKey, err := parentLink.GetHashKey(parentNodeKRForHash, sigVerifyKRForHash)
+		if err != nil {
+			return "", nil, err
+		}
+		photo = &proton.CommitRevisionPhoto{
+			CaptureTime: modTime.UTC().Unix(),
+			ContentHash: proton.ComputePhotoContentHash(parentHashKey, digests),
+		}
 	}
 
 	err = protonDrive.commitNewRevision(ctx, newNodeKR, xAttrCommon, camera, photo, manifestSignature, linkID, revisionID)
