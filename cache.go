@@ -278,6 +278,14 @@ func (protonDrive *ProtonDrive) getLinkKRByID(ctx context.Context, linkID string
 	return protonDrive.getLinkKR(ctx, link)
 }
 
+// InvalidateLink evicts a link (and optionally its children) from the
+// bridge's link cache, so subsequent getLink calls re-fetch fresh state from
+// the API. Needed when the state of a link changed outside the bridge's
+// bookkeeping (e.g. a same-named file was trashed by another device).
+func (protonDrive *ProtonDrive) InvalidateLink(linkID string) {
+	protonDrive.removeLinkIDFromCache(linkID, false)
+}
+
 func (protonDrive *ProtonDrive) removeLinkIDFromCache(linkID string, includingChildren bool) {
 	if !protonDrive.cache.enableCaching {
 		return
