@@ -214,3 +214,66 @@ func (protonDrive *ProtonDrive) getSignatureVerificationKeyring(emailAddresses [
 	}
 	return ret, nil
 }
+
+// MainVolumeView returns a drive scoped to the account's main (files)
+// volume, sharing this drive's client, manager, keyrings, and token
+// lifecycle. The Photos share rejects non-photo content (422), so app-owned
+// files must live in the regular Drive -- but constructing a second bridge
+// instance would run a second token manager against Proton's single-use
+// refresh tokens, and the two clients would consume each other's refresh
+// tokens and poison the session. Deriving the files view from the existing
+// session avoids that entirely.
+func (protonDrive *ProtonDrive) MainVolumeView(ctx context.Context) (*ProtonDrive, error) {
+	volumes, err := listAllVolumes(ctx, protonDrive.c)
+	if err != nil {
+		return nil, err
+	}
+	mainShareID := ""
+	for i := range volumes {
+		if volumes[i].State == proton.VolumeStateActive {
+			mainShareID = volumes[i].Share.ShareID
+		}
+	}
+	if mainShareID == "" {
+		return nil, ErrMainVolumeNotFound
+	}
+
+	mainShare, err := getShareByID(ctx, protonDrive.c, mainShareID)
+	if err != nil {
+		return nil, err
+	}
+
+	rootLink, err := protonDrive.c.GetLink(ctx, mainShare.ShareID, mainShare.LinkID)
+	if err != nil {
+		return nil, err
+	}
+
+	mainShareAddrKR := protonDrive.addrKRs[mainShare.AddressID]
+	mainShareKR, err := mainShare.GetKeyRing(mainShareAddrKR)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ProtonDrive{
+		MainShare: mainShare,
+		RootLink:  &rootLink,
+
+		MainShareKR:   mainShareKR,
+		DefaultAddrKR: mainShareAddrKR,
+
+		Config: protonDrive.Config,
+
+		isPhotosVolume: false,
+
+		c:                protonDrive.c,
+		m:                protonDrive.m,
+		userKR:           protonDrive.userKR,
+		addrKRs:          protonDrive.addrKRs,
+		addrData:         protonDrive.addrData,
+		signatureAddress: mainShare.Creator,
+
+		cache:                newCache(protonDrive.Config.EnableCaching),
+		blockUploadSemaphore: semaphore.NewWeighted(int64(protonDrive.Config.ConcurrentBlockUploadCount)),
+		blockCryptoSemaphore: semaphore.NewWeighted(int64(protonDrive.Config.ConcurrentFileCryptoCount)),
+	}, nil
+}

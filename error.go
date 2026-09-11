@@ -4,6 +4,7 @@ import "errors"
 
 var (
 	ErrMainSharePreconditionsFailed          = errors.New("the main share assumption has failed")
+	ErrMainVolumeNotFound                    = errors.New("no active main (files) volume found")
 	ErrDataFolderNameIsEmpty                 = errors.New("please supply a DataFolderName to enabling file downloading")
 	ErrLinkTypeMustToBeFolderType            = errors.New("the link type must be of folder type")
 	ErrLinkTypeMustToBeFileType              = errors.New("the link type must be of file type")
