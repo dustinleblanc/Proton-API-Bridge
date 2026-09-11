@@ -19,6 +19,23 @@ func (protonDrive *ProtonDrive) moveToTrash(ctx context.Context, parentLinkID st
 	return nil
 }
 
+// DeleteOrphanDraftByID hard-deletes a draft-state file link left behind by
+// a failed upload commit (the revision never became active). Such a link
+// reserves its name -- CreateFile responds 2500 "name already exists" -- but
+// its revisions list responds 2501 "not found", which wedges the normal
+// revision-in-place upload path forever. The link is evicted from the cache
+// first so subsequent searches don't resurrect it.
+func (protonDrive *ProtonDrive) DeleteOrphanDraftByID(ctx context.Context, link *proton.Link) error {
+	if link == nil {
+		return ErrLinkMustNotBeNil
+	}
+	if link.State != proton.LinkStateDraft {
+		return ErrLinkMustBeActive
+	}
+	protonDrive.removeLinkIDFromCache(link.LinkID, false)
+	return protonDrive.c.DeleteChildren(ctx, protonDrive.MainShare.ShareID, link.ParentLinkID, link.LinkID)
+}
+
 func (protonDrive *ProtonDrive) MoveFileToTrashByID(ctx context.Context, linkID string) error {
 	/* It's like event system, we need to get the latest information before creating the move request! */
 	protonDrive.removeLinkIDFromCache(linkID, false)
